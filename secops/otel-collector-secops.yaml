@@ -1,0 +1,82 @@
+# OpenTelemetry Collector config for the LGTM container, with two log pipelines:
+#   logs/ops   every event, secrets redacted, to Loki (what you query in Grafana)
+#   logs/siem  security events only, secrets redacted, to a stand-in SIEM (the
+#              Collector's own output: docker logs workshop-lgtm)
+# Metrics and traces go where the image's default config sends them.
+# Start it with: ./scripts/run-lgtm.sh --collector secops/otel-collector-secops.yaml
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+    path: "/ready"
+
+processors:
+  batch:
+
+  # Redact credentials before any backend stores them. Runs on both log pipelines.
+  transform/scrub_secrets:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - replace_pattern(attributes["tool_parameters"], "AKIA[0-9A-Z]{16}", "[REDACTED:aws_key]")
+          - replace_pattern(attributes["tool_input"], "AKIA[0-9A-Z]{16}", "[REDACTED:aws_key]")
+          - replace_pattern(attributes["tool_parameters"], "gh[pousr]_[A-Za-z0-9]{36,}", "[REDACTED:github_token]")
+          - replace_pattern(attributes["tool_input"], "gh[pousr]_[A-Za-z0-9]{36,}", "[REDACTED:github_token]")
+          - replace_pattern(attributes["tool_parameters"], "sk-ant-[A-Za-z0-9_-]{20,}", "[REDACTED:anthropic_key]")
+          - replace_pattern(attributes["tool_input"], "sk-ant-[A-Za-z0-9_-]{20,}", "[REDACTED:anthropic_key]")
+          - replace_pattern(attributes["tool_parameters"], "(?i)bearer [A-Za-z0-9._~+/=-]{8,}", "Bearer [REDACTED:token]")
+          - replace_pattern(attributes["tool_input"], "(?i)bearer [A-Za-z0-9._~+/=-]{8,}", "Bearer [REDACTED:token]")
+
+  # Keep only security events on the SIEM path, to control ingest cost.
+  # A log record that matches a condition here is dropped.
+  filter/security_events:
+    error_mode: ignore
+    logs:
+      log_record:
+        - not IsMatch(attributes["event.name"], "^(tool_decision|tool_result|permission_mode_changed|auth|mcp_server_connection|plugin_installed|hook_execution_complete|managed_settings_resolved|user_prompt)$")
+
+exporters:
+  otlp_http/metrics:
+    endpoint: http://127.0.0.1:9090/api/v1/otlp
+    tls:
+      insecure: true
+  otlp_http/traces:
+    endpoint: http://127.0.0.1:4418
+    tls:
+      insecure: true
+  otlp_http/logs:
+    endpoint: http://127.0.0.1:3100/otlp
+    tls:
+      insecure: true
+  # The stand-in SIEM. In production this is splunk_hec, elasticsearch or kafka.
+  debug/siem:
+    verbosity: detailed
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_http/traces]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_http/metrics]
+    logs/ops:
+      receivers: [otlp]
+      processors: [transform/scrub_secrets, batch]
+      exporters: [otlp_http/logs]
+    logs/siem:
+      receivers: [otlp]
+      processors: [transform/scrub_secrets, filter/security_events, batch]
+      exporters: [debug/siem]

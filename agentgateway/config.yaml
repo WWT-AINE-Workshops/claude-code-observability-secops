@@ -1,0 +1,40 @@
+# agentgateway v1.6.0 config for Lab 3.
+#   Strict: a request without a valid key gets 401 at the gateway.
+#   Attributed: the user and team from the key's metadata go on every access log and span.
+#   One stack: logs and traces go to the LGTM container's Collector on port 4317.
+#   The real Anthropic key stays in the gateway. It is read from the ANTHROPIC_API_KEY
+#   variable of the terminal that starts agentgateway, and is never written in this file.
+# The sk-agw-... keys below are made-up local keys for the lab, not secrets.
+# Start it with: agentgateway -f agentgateway/config.yaml
+
+frontendPolicies:
+  tracing:
+    host: localhost:4317
+    randomSampling: true
+    attributes:
+      user.email: apiKey.user
+  accessLog:
+    add:
+      user.email: apiKey.user
+      team.id: apiKey.team
+    otlp:
+      host: localhost:4317
+
+llm:
+  policies:
+    apiKey:
+      mode: strict
+      keys:
+        - key: sk-agw-alice-demo
+          metadata:
+            user: alice@example.com
+            team: platform
+        - key: sk-agw-bob-demo
+          metadata:
+            user: bob@example.com
+            team: payments
+  models:
+    - name: "*"
+      provider: anthropic
+      params:
+        apiKey: "$ANTHROPIC_API_KEY"
